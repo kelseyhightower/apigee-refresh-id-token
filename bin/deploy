@@ -6,6 +6,7 @@ SERVICE_ACCOUNT_NAME="private-function-invoker"
 gcloud alpha functions deploy apigee-refresh-id-token \
   --verbosity debug \
   --entry-point F \
+  --env-vars-file env.yaml \
   --memory 2048MB \
   --region us-central1 \
   --runtime go111 \

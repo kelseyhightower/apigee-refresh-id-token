@@ -1,3 +1,7 @@
+// Copyright 2018 Google Inc. All Rights Reserved.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+
 package function
 
 import (
@@ -118,6 +122,26 @@ func F(ctx context.Context, m PubSubMessage) error {
 		return fmt.Errorf(message)
 	}
 
+	apigeeCredentialsBucket := os.Getenv("APIGEE_CREDENTIALS_BUCKET")
+	if apigeeCredentialsBucket == "" {
+		message := "Failed to extract credentials bucket name from APIGEE_CREDENTIALS_BUCKET environment variable, empty string"
+        logger.Log(logging.Entry{
+            Payload:  message,
+            Severity: logging.Error,
+        })
+        return fmt.Errorf(message)
+	}
+
+	apigeeCredentialsFile := os.Getenv("APIGEE_CREDENTIALS_FILE")
+    if apigeeCredentialsFile == "" {
+        message := "Failed to extract credentials file name from APIGEE_CREDENTIALS_FILE environment variable, empty string"
+        logger.Log(logging.Entry{
+            Payload:  message,
+            Severity: logging.Error,
+        })
+        return fmt.Errorf(message)
+    }
+
 	// Setup Stackdriver tracing to trace every function invocation.
 	stackdriverExporter, err := stackdriver.NewExporter(stackdriver.Options{ProjectID: projectId})
 	if err != nil {
@@ -204,12 +228,12 @@ func F(ctx context.Context, m PubSubMessage) error {
 		return fmt.Errorf(message)
 	}
 
-	o, err := storageClient.Bucket("hightowerlabs").Object("apigee-credentials.json").NewReader(context.Background())
+	o, err := storageClient.Bucket(apigeeCredentialsBucket).Object(apigeeCredentialsFile).NewReader(context.Background())
 	if err != nil {
 		labels := map[string]string{
-			"bucket": "hightowerlabs",
-			"object": "apigee-credentials.json",
-		}
+            "apigee_credentials_bucket": apigeeCredentialsBucket,
+            "apigee_credentials_file":   apigeeCredentialsFile,
+        }
 		message := fmt.Sprintf("Failed to retrieve Apigee credentials from GCS: %s", err)
 		logger.Log(logging.Entry{
 			Labels:   labels,
@@ -222,8 +246,8 @@ func F(ctx context.Context, m PubSubMessage) error {
 	var apigeeCredentials ApigeeCredentials
 	if err := json.NewDecoder(o).Decode(&apigeeCredentials); err != nil {
 		labels := map[string]string{
-			"bucket": "hightowerlabs",
-			"object": "apigee-credentials.json",
+			"apigee_credentials_bucket": apigeeCredentialsBucket,
+			"apigee_credentials_file":   apigeeCredentialsFile,
 		}
 		message := fmt.Sprintf("Failed to unmarshal Apigee credentials: %s", err)
 		logger.Log(logging.Entry{
@@ -289,14 +313,21 @@ func F(ctx context.Context, m PubSubMessage) error {
 	// Get Apigee access token
 	apigeeLoginRequest, err := http.NewRequest("POST", "https://login.apigee.com/oauth/token", nil)
 	if err != nil {
+		message := fmt.Sprintf("Failed to create Apigee OAuth token request: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error creating Apigee oauth token request: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	apigeeLoginRequest.Header.Add("Accept", "application/json;charset=utf-8")
+
+	// The Authorization header used for issuing OAuth token requests
+	// is a hardcoded value as described in the official docs:
+	//
+	//  https://docs.apigee.com/api-platform/system-administration/management-api-tokens
+	//
 	apigeeLoginRequest.Header.Add("Authorization", "Basic ZWRnZWNsaTplZGdlY2xpc2VjcmV0")
 
 	apigeeLoginValues := apigeeLoginRequest.URL.Query()
@@ -310,34 +341,36 @@ func F(ctx context.Context, m PubSubMessage) error {
 	apigeeLoginResponse, err := http.DefaultClient.Do(apigeeLoginRequest)
 	if err != nil {
 		apigeeLoginSpan.End()
+
+		message := fmt.Sprintf("Failed to obtain an Apigee OAuth token: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error obtaining Apigee oauth token: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 	apigeeLoginSpan.End()
 
 	apigeeLoginResponseData, err := ioutil.ReadAll(apigeeLoginResponse.Body)
 	if err != nil {
+		message := fmt.Sprintf("Failed to read Apigee OAuth token response body: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error reading Apigee oauth token request: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	apigeeLoginResponse.Body.Close()
 
 	var a ApigeeLoginResponse
-
-	err = json.Unmarshal(apigeeLoginResponseData, &a)
-	if err != nil {
+	if err := json.Unmarshal(apigeeLoginResponseData, &a); err != nil {
+		message := fmt.Sprintf("Failed to unmarshal Apigee OAuth token response body: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error unmarshalling Apigee oauth token request: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	// Refresh the ID token stored in Apigee.
@@ -352,49 +385,56 @@ func F(ctx context.Context, m PubSubMessage) error {
 
 	entryData, err := json.Marshal(&entry)
 	if err != nil {
+		message := fmt.Sprintf("Failed to marshal Apigee key value map entry: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error marshalling Apigee key value map entry: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	url := formatUpdateKeyValueMapsUrl(event.Organization, event.Environment, event.KeyValueMap, event.Key)
 	apigeeUpdateKeyValueMapRequest, err := http.NewRequest("POST", url, bytes.NewBuffer(entryData))
 	if err != nil {
+		message := fmt.Sprintf("Failed to create Apigee key value map request: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error creating Apigee update key value map request: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	apigeeUpdateKeyValueMapRequest.Header.Add("Authorization", fmt.Sprintf("Bearer %s", a.AccessToken))
 	apigeeUpdateKeyValueMapRequest.Header.Add("Content-Type", "application/json")
 
 	_, apigeeUpdateKeyValueMapSpan := trace.StartSpan(parentSpanContext, "apigee-update-kvm")
+
 	apigeeUpdateKeyValueMapResponse, err := http.DefaultClient.Do(apigeeUpdateKeyValueMapRequest)
 	if err != nil {
 		apigeeUpdateKeyValueMapSpan.End()
+
+		message := fmt.Sprintf("Failed to update Apigee key value map: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error during Apigee update key value map request: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	apigeeUpdateKeyValueMapSpan.End()
 
 	statusCode := apigeeUpdateKeyValueMapResponse.StatusCode
 	if statusCode != 200 {
+		message := fmt.Sprintf("Failed to update Apigee key value map, status code: %v", statusCode)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error updating Apigee key value map got status code %s", statusCode),
+			Payload:  message,
 			Severity: logging.Error,
 		})
+		return fmt.Errorf(message)
 	}
 
 	logger.Log(logging.Entry{
-		Payload:  "successfully updated key value map entry",
+		Payload:  "Successfully updated Apigee key value map entry",
 		Severity: logging.Info,
 	})
 
