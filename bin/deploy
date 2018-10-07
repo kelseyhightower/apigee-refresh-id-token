@@ -1,0 +1,14 @@
+#!/bin/bash
+
+PROJECT_ID=$(gcloud config get-value core/project)
+SERVICE_ACCOUNT_NAME="private-function-invoker"
+
+gcloud alpha functions deploy apigee-refresh-id-token \
+  --verbosity debug \
+  --entry-point F \
+  --memory 2048MB \
+  --region us-central1 \
+  --runtime go111 \
+  --trigger-event google.pubsub.topic.publish \
+  --trigger-resource refresh-apigee-id-token-events \
+  --service-account "${SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"

@@ -1,0 +1,7 @@
+#!/bin/bash
+
+echo "create refresh token event ..."
+gcloud alpha scheduler jobs create pubsub refresh-private-function-id-token \
+  --message-body-from-file events/private-function.json \
+  --schedule "every 5 minutes" \
+  --topic refresh-apigee-id-token-events
