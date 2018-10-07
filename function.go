@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -58,23 +57,35 @@ func F(ctx context.Context, m PubSubMessage) error {
 
 	projectId := os.Getenv("GCP_PROJECT")
 	if projectId == "" {
-		return errors.New("GCP_PROJECT must be set and non-empty")
+		return fmt.Errorf("Failed to extract GCP project ID from GCP_PROJECT environment variable, empty string")
 	}
 
 	functionName := os.Getenv("FUNCTION_NAME")
 	if functionName == "" {
-		return errors.New("FUNCTION_NAME must be set and non-empty")
+		return fmt.Errorf("Failed to extract function name from FUNCTION_NAME environment variable, empty string")
 	}
 
 	region := os.Getenv("FUNCTION_REGION")
 	if region == "" {
-		return errors.New("FUNCTION_REGION must be set and non-empty")
+		return fmt.Errorf("Failed to extract function region from FUNCTION_REGION environment variable, empty string")
 	}
 
 	// Setup Stackdriver logging.
+	//
+	// This code assumes the function was invoked by Pub/Sub
+	// which sets the event ID to the same value as the function
+	// execution ID.
+	//
+	// When this function is invoked using the Cloud Functions
+	// UI the event ID is not guaranteed to match the function
+	// execution ID.
+	//
+	// When the event ID and function ID do not match Stackdriver
+	// will not correlate logs emitted by this function with the
+	// logs produced by the underlying function runtime.
 	loggingClient, err := logging.NewClient(context.Background(), projectId)
 	if err != nil {
-		return fmt.Errorf("error setting up Stackdriver logging: %s", err)
+		return fmt.Errorf("Failed to create Stackdriver logging client: %s", err)
 	}
 
 	monitoredResource := monitoredres.MonitoredResource{
@@ -94,106 +105,156 @@ func F(ctx context.Context, m PubSubMessage) error {
 		logging.CommonLabels(commonLabels),
 	)
 
+	// Ensure logs are sent to Stackdriver.
 	defer logger.Flush()
 
 	serviceAccountEmail := os.Getenv("FUNCTION_IDENTITY")
 	if serviceAccountEmail == "" {
+		message := "Failed to extract function identity from FUNCTION_IDENTITY environment variable, empty string"
 		logger.Log(logging.Entry{
-			Payload:  "FUNCTION_IDENTITY must be set and non-empty",
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return errors.New("FUNCTION_IDENTITY must be set and non-empty")
+		return fmt.Errorf(message)
 	}
 
-	// Setup Stackdriver tracing.
+	// Setup Stackdriver tracing to trace every function invocation.
 	stackdriverExporter, err := stackdriver.NewExporter(stackdriver.Options{ProjectID: projectId})
 	if err != nil {
+		message := fmt.Sprintf("Failed to create Stackdriver trace exporter: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error creating stackdriver exporter: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	trace.RegisterExporter(stackdriverExporter)
 	trace.ApplyConfig(trace.Config{DefaultSampler: trace.AlwaysSample()})
 
+	// Start tracing function execution.
 	parentSpanContext, parentSpan := trace.StartSpan(ctx, "apigee-refresh-id-token")
 	defer parentSpan.End()
 
-	// Process refresh token event.
-	eventLabels := make(map[string]string)
-	eventLabels["data"] = string(m.Data)
-	d, err := base64.StdEncoding.DecodeString(string(m.Data))
+	// Extract the refresh token event from the Pub/Sub message.
+	//
+	// This code assumes the Cloud Pub/Sub message was created by
+	// Cloud Scheduler which Base64 encodes payloads before
+	// publishing to Cloud Pub/Sub. This results in the message
+	// data field being Base64 encoded twice:
+	//
+	//   {"data": "Base64(Base64(RefreshTokenEvent))"}
+	//
+	// The Cloud Function Go runtime Base64 decodes the Pub/Sub
+	// message data field before invoking the function, which
+	// results in the data field holding the Base64 encoded string
+	// created by Cloud Scheduler.
+	//
+	// The message data field must be Base64 decoded before JSON
+	// deserialization.
+	messageData, err := base64.StdEncoding.DecodeString(string(m.Data))
 	if err != nil {
+		labels := map[string]string{
+			"data": string(m.Data),
+		}
+		message := fmt.Sprintf("Failed to Base64 decode message data: %s", err)
 		logger.Log(logging.Entry{
-			Labels:   eventLabels,
-			Payload:  fmt.Sprintf("error base64 decoding refresh token event: %s", err),
+			Labels:   labels,
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	var event RefreshTokenEvent
-	if err := json.Unmarshal(d, &event); err != nil {
+	if err := json.Unmarshal(messageData, &event); err != nil {
+		labels := map[string]string{
+			"base64_decoded_message_data": string(messageData),
+		}
+		message := fmt.Sprintf("Failed to unmarshal message data: %s", err)
 		logger.Log(logging.Entry{
-			Labels:   eventLabels,
-			Payload:  fmt.Sprintf("error parsing refresh token event: %s", err),
+			Labels:   labels,
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
+	// Extract event parameters and set them as Stackdriver common
+	// logging labels, which will be attached to all Stackdriver log
+	// entries from this point on.
 	commonLabels["apigee_environment"] = event.Environment
 	commonLabels["apigee_organization"] = event.Organization
 	commonLabels["apigee_key_value_map"] = event.KeyValueMap
 	commonLabels["apigee_key"] = event.Key
 	commonLabels["apigee_function_url"] = event.FunctionUrl
 
-	// Get Apigee credentials from GCS bucket.
+	// Apigee credentials are required to fetch access tokens from
+	// the Apigee login service.
+	//    https://docs.apigee.com/api-platform/system-administration/using-oauth2
+	//
+	// Fetch the Apigee credentials from GCS bucket.
 	storageClient, err := storage.NewClient(context.Background())
 	if err != nil {
+		message := fmt.Sprintf("Failed to create storage client: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error creating storage client: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	o, err := storageClient.Bucket("hightowerlabs").Object("apigee-credentials.json").NewReader(context.Background())
 	if err != nil {
+		labels := map[string]string{
+			"bucket": "hightowerlabs",
+			"object": "apigee-credentials.json",
+		}
+		message := fmt.Sprintf("Failed to retrieve Apigee credentials from GCS: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error loading Apigee credentials: %s", err),
+			Labels:   labels,
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	var apigeeCredentials ApigeeCredentials
 	if err := json.NewDecoder(o).Decode(&apigeeCredentials); err != nil {
+		labels := map[string]string{
+			"bucket": "hightowerlabs",
+			"object": "apigee-credentials.json",
+		}
+		message := fmt.Sprintf("Failed to unmarshal Apigee credentials: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error loading Apigee credentials: %s", err),
+			Labels:   labels,
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
-	client, err := google.DefaultClient(oauth2.NoContext, iam.CloudPlatformScope)
+	// Generate an ID token.
+	//
+	// The ID token is used to invoke private cloud functions.
+	iamClient, err := google.DefaultClient(oauth2.NoContext, iam.CloudPlatformScope)
 	if err != nil {
+		message := fmt.Sprintf("Failed to create IAM google default client: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error setting up google default client: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
-	iamcredentialsService, err := iamcredentials.New(client)
+	iamcredentialsService, err := iamcredentials.New(iamClient)
 	if err != nil {
+		message := fmt.Sprintf("Failed to create IAM credentials service: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error creating IAM credentials service: %s", err),
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 
 	serviceAccountResourceName := fmt.Sprintf("projects/-/serviceAccounts/%s", serviceAccountEmail)
@@ -209,11 +270,19 @@ func F(ctx context.Context, m PubSubMessage) error {
 		serviceAccountResourceName, idTokenRequest).Do()
 	if err != nil {
 		generateIdTokenSpan.End()
+
+		labels := map[string]string{
+			"service_account_resource_name": serviceAccountResourceName,
+			"id_token_audience":             event.FunctionUrl,
+			"id_token_delegates":            serviceAccountResourceName,
+		}
+		message := fmt.Sprintf("Failed to generate ID token: %s", err)
 		logger.Log(logging.Entry{
-			Payload:  fmt.Sprintf("error generating ID token: %s", err),
+			Labels:   labels,
+			Payload:  message,
 			Severity: logging.Error,
 		})
-		return err
+		return fmt.Errorf(message)
 	}
 	generateIdTokenSpan.End()
 
@@ -271,7 +340,11 @@ func F(ctx context.Context, m PubSubMessage) error {
 		return err
 	}
 
-	// Update Apigee key value map.
+	// Refresh the ID token stored in Apigee.
+	//
+	// This code assumes the Apigee key value map and initial key
+	// already exist. The value can be set to any value and will be
+	// updated by this function.
 	entry := KeyValueMapEntry{
 		Name:  event.Key,
 		Value: idTokenResponse.Token,
