@@ -125,22 +125,22 @@ func F(ctx context.Context, m PubSubMessage) error {
 	apigeeCredentialsBucket := os.Getenv("APIGEE_CREDENTIALS_BUCKET")
 	if apigeeCredentialsBucket == "" {
 		message := "Failed to extract credentials bucket name from APIGEE_CREDENTIALS_BUCKET environment variable, empty string"
-        logger.Log(logging.Entry{
-            Payload:  message,
-            Severity: logging.Error,
-        })
-        return fmt.Errorf(message)
+		logger.Log(logging.Entry{
+			Payload:  message,
+			Severity: logging.Error,
+		})
+		return fmt.Errorf(message)
 	}
 
 	apigeeCredentialsFile := os.Getenv("APIGEE_CREDENTIALS_FILE")
-    if apigeeCredentialsFile == "" {
-        message := "Failed to extract credentials file name from APIGEE_CREDENTIALS_FILE environment variable, empty string"
-        logger.Log(logging.Entry{
-            Payload:  message,
-            Severity: logging.Error,
-        })
-        return fmt.Errorf(message)
-    }
+	if apigeeCredentialsFile == "" {
+		message := "Failed to extract credentials file name from APIGEE_CREDENTIALS_FILE environment variable, empty string"
+		logger.Log(logging.Entry{
+			Payload:  message,
+			Severity: logging.Error,
+		})
+		return fmt.Errorf(message)
+	}
 
 	// Setup Stackdriver tracing to trace every function invocation.
 	stackdriverExporter, err := stackdriver.NewExporter(stackdriver.Options{ProjectID: projectId})
@@ -231,9 +231,9 @@ func F(ctx context.Context, m PubSubMessage) error {
 	o, err := storageClient.Bucket(apigeeCredentialsBucket).Object(apigeeCredentialsFile).NewReader(context.Background())
 	if err != nil {
 		labels := map[string]string{
-            "apigee_credentials_bucket": apigeeCredentialsBucket,
-            "apigee_credentials_file":   apigeeCredentialsFile,
-        }
+			"apigee_credentials_bucket": apigeeCredentialsBucket,
+			"apigee_credentials_file":   apigeeCredentialsFile,
+		}
 		message := fmt.Sprintf("Failed to retrieve Apigee credentials from GCS: %s", err)
 		logger.Log(logging.Entry{
 			Labels:   labels,
