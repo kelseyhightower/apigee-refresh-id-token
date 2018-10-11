@@ -1,7 +1,0 @@
-{
-  "environment": "prod",
-  "function_url": "https://us-central1-hightowerlabs.cloudfunctions.net/private-function",
-  "key": "private-function-token",
-  "key_value_map": "google-cloud-functions",
-  "organization": "hightowerlabs"
-}

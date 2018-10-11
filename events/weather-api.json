@@ -1,0 +1,7 @@
+{
+  "environment": "prod",
+  "function_url": "https://us-central1-hightowerlabs.cloudfunctions.net/weather-api",
+  "key": "weather-api-token",
+  "key_value_map": "google-cloud-functions",
+  "organization": "hightowerlabs"
+}
