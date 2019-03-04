@@ -1,11 +1,5 @@
 #!/bin/bash
 
-echo "create refresh token event ..."
-gcloud alpha scheduler jobs create pubsub refresh-private-function-id-token \
-  --message-body-from-file events/private-function.json \
-  --schedule "every 10 minutes" \
-  --topic refresh-apigee-id-token-events
-
 gcloud alpha scheduler jobs create pubsub refresh-weather-api-id-token \
   --message-body-from-file events/weather-api.json \
   --schedule "every 10 minutes" \

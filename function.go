@@ -7,14 +7,12 @@ package function
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
 
-	"cloud.google.com/go/functions/metadata"
 	"cloud.google.com/go/logging"
 	"cloud.google.com/go/storage"
 	"contrib.go.opencensus.io/exporter/stackdriver"
@@ -54,11 +52,6 @@ type ApigeeLoginResponse struct {
 }
 
 func F(ctx context.Context, m PubSubMessage) error {
-	eventMetadata, ok := metadata.FromContext(ctx)
-	if !ok {
-		return fmt.Errorf("Failed to extract event metadata from context")
-	}
-
 	projectId := os.Getenv("GCP_PROJECT")
 	if projectId == "" {
 		return fmt.Errorf("Failed to extract GCP project ID from GCP_PROJECT environment variable, empty string")
@@ -102,7 +95,6 @@ func F(ctx context.Context, m PubSubMessage) error {
 	}
 
 	commonLabels := make(map[string]string)
-	commonLabels["execution_id"] = eventMetadata.EventID
 
 	logger := loggingClient.Logger("cloudfunctions.googleapis.com/cloud-functions",
 		logging.CommonResource(&monitoredResource),
@@ -176,24 +168,25 @@ func F(ctx context.Context, m PubSubMessage) error {
 	//
 	// The message data field must be Base64 decoded before JSON
 	// deserialization.
-	messageData, err := base64.StdEncoding.DecodeString(string(m.Data))
-	if err != nil {
-		labels := map[string]string{
-			"data": string(m.Data),
+	/*
+		messageData, err := base64.StdEncoding.DecodeString(string(m.Data))
+		if err != nil {
+			labels := map[string]string{
+				"data": string(m.Data),
+			}
+			message := fmt.Sprintf("Failed to Base64 decode message data: %s", err)
+			logger.Log(logging.Entry{
+				Labels:   labels,
+				Payload:  message,
+				Severity: logging.Error,
+			})
+			return fmt.Errorf(message)
 		}
-		message := fmt.Sprintf("Failed to Base64 decode message data: %s", err)
-		logger.Log(logging.Entry{
-			Labels:   labels,
-			Payload:  message,
-			Severity: logging.Error,
-		})
-		return fmt.Errorf(message)
-	}
-
+	*/
 	var event RefreshTokenEvent
-	if err := json.Unmarshal(messageData, &event); err != nil {
+	if err := json.Unmarshal(m.Data, &event); err != nil {
 		labels := map[string]string{
-			"base64_decoded_message_data": string(messageData),
+			"base64_decoded_message_data": string(m.Data),
 		}
 		message := fmt.Sprintf("Failed to unmarshal message data: %s", err)
 		logger.Log(logging.Entry{
